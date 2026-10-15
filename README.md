@@ -25,6 +25,8 @@ Apache n’héberge pas l’application Next.js : Next fonctionne comme un serve
 
 5. Ouvrir [http://localhost:3000](http://localhost:3000).
 
+Pour envoyer automatiquement une requête `SELECT 1` à MySQL toutes les deux heures et limiter sa mise en veille, définir `DB_KEEPALIVE_ENABLED=true` dans `.env.local`, puis redémarrer le serveur Next.js. Cette option est désactivée par défaut et nécessite un serveur Node.js qui reste en fonctionnement; sur une plateforme serverless, utiliser plutôt un ordonnanceur externe qui appelle régulièrement un service actif.
+
 `npm run seed` crée ou actualise quatre comptes de démonstration, **10 chantiers**, **19 matériaux** et **200 tâches planifiées**. Le catalogue couvre la préparation du terrain, le gros œuvre, la maçonnerie, les enduits, les sols, la peinture, la couverture et des réseaux simples. Chaque chantier comprend une référence, un type d’ouvrage, une localisation, une surface, un nombre de niveaux, un budget indicatif et une description. Les tâches et ratios sont adaptés à la surface déclarée. Le script peut être relancé : il actualise les caractéristiques et ratios sans créer de doublons. Les codes ci-dessous sont réservés aux essais locaux; changez-les avant tout usage partagé.
 
 Les projets couvrent logements, école, centre de santé, entrepôt, commerce, atelier et marché dans plusieurs villes du Sénégal. Les quantités et ratios ajoutés au-delà des lignes lisibles du classeur sont des hypothèses de démonstration, destinées à alimenter l’interface; validez-les avec vos études réelles avant de les utiliser pour des décisions de chantier.
