@@ -106,21 +106,30 @@ export async function GET() {
     const [snapshots] = await db.execute<RowDataPacket[]>(
       `SELECT s.id,s.task_id,s.project_id,s.baseline_percent,s.predicted_percent_7d,
         s.logistic_success_probability,s.normal_success_probability,s.uniform_success_probability,
-        s.sample_days,s.created_at,t.name AS task_name,p.name AS project_name,t.progress_percent AS current_percent
+        s.sample_days,s.created_at,t.name AS task_name,p.name AS project_name,
+        (SELECT COALESCE(SUM(dr.progress_percent_delta),0) FROM daily_reports dr
+         WHERE dr.task_id=s.task_id AND dr.created_at>s.created_at AND dr.created_at<=DATE_ADD(s.created_at,INTERVAL 7 DAY)) AS actual_delta_7d
        FROM prediction_snapshots s JOIN tasks t ON t.id=s.task_id JOIN projects p ON p.id=s.project_id
        ORDER BY s.created_at DESC LIMIT 30`,
     );
     const comparisons = snapshots.map((snapshot) => {
       const ageDays = Math.floor((Date.now() - new Date(snapshot.created_at).getTime()) / 86_400_000);
-      const actual = Number(snapshot.current_percent);
+      const actual = Math.min(100, Number(snapshot.baseline_percent) + Number(snapshot.actual_delta_7d ?? 0));
       const predicted = Number(snapshot.predicted_percent_7d);
       return { ...snapshot, ageDays, actualProgressPercent: ageDays >= 7 ? actual : null,
         actualDeltaPoints: ageDays >= 7 ? actual - Number(snapshot.baseline_percent) : null,
         predictionErrorPoints: ageDays >= 7 ? actual - predicted : null };
     });
+    const [projectHistory] = await db.execute<RowDataPacket[]>(
+      `SELECT p.id AS project_id,p.name AS project_name,dr.id AS report_id,dr.report_date,
+        t.name AS task_name,t.code AS task_code,m.id AS material_id,m.name AS material_name,m.unit,rm.quantity
+       FROM daily_reports dr JOIN tasks t ON t.id=dr.task_id JOIN projects p ON p.id=t.project_id
+       JOIN report_materials rm ON rm.report_id=dr.id JOIN materials m ON m.id=rm.material_id
+       WHERE p.is_active=TRUE ORDER BY p.id,dr.report_date DESC,dr.id DESC,m.name`,
+    );
     const [reportSummary] = await db.execute<RowDataPacket[]>(
       `SELECT COUNT(*) AS count,MAX(report_date) AS last_report FROM daily_reports`,
     );
-    return NextResponse.json({ projects, tasks: forecastTasks, materials, comparisons, reportSummary: reportSummary[0] });
+    return NextResponse.json({ projects, tasks: forecastTasks, materials, comparisons, projectHistory, reportSummary: reportSummary[0] });
   } catch (error) { return jsonError(error); }
 }
