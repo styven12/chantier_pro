@@ -10,6 +10,36 @@ const db = await mysql.createConnection({
   database: process.env.DB_NAME ?? 'chantier_pro', charset: 'utf8mb4',
 });
 
+try {
+const projectColumns = [
+  ['project_type', 'VARCHAR(100) NULL AFTER name'],
+  ['description', 'VARCHAR(1000) NULL AFTER project_type'],
+  ['built_area_m2', 'DECIMAL(14,2) NULL AFTER location'],
+  ['floor_count', 'SMALLINT UNSIGNED NULL AFTER built_area_m2'],
+  ['estimated_budget', 'DECIMAL(18,2) NULL AFTER floor_count'],
+  ['currency', "CHAR(3) NOT NULL DEFAULT 'XOF' AFTER estimated_budget"],
+] as const;
+for (const [column, definition] of projectColumns) {
+  const [existing] = await db.execute<RowDataPacket[]>(
+    'SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=\'projects\' AND COLUMN_NAME=? LIMIT 1',
+    [column],
+  );
+  if (!existing.length) await db.execute(`ALTER TABLE projects ADD COLUMN ${column} ${definition}`);
+}
+await db.execute(
+  `CREATE TABLE IF NOT EXISTS project_members (
+    project_id BIGINT UNSIGNED NOT NULL,
+    user_id BIGINT UNSIGNED NOT NULL,
+    assigned_by BIGINT UNSIGNED NULL,
+    assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (project_id,user_id),
+    CONSTRAINT fk_project_members_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    CONSTRAINT fk_project_members_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_project_members_assigned_by FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE SET NULL,
+    KEY idx_project_members_user (user_id,project_id)
+  ) ENGINE=InnoDB`,
+);
+
 const users = [
   { name: 'Awa Ndiaye', username: 'ingenieur', code: '123456', role: 'ENGINEER' },
   { name: 'Moussa Diop', username: 'ressources', code: '234567', role: 'RESOURCE_MANAGER' },
@@ -23,11 +53,14 @@ const projects = [
   { ref: 'ECO-TH1', name: 'École primaire des six classes', type: 'Équipement scolaire', location: 'Thiès — Mbour 3', area: 960, floors: 1, budget: 215000000, desc: 'Six salles de classe, administration, sanitaires et cour.' },
   { ref: 'CSR-MB1', name: 'Centre de santé de proximité', type: 'Équipement de santé', location: 'Mbour — Grand Mbour', area: 740, floors: 1, budget: 268000000, desc: 'Consultations, maternité, pharmacie et locaux techniques.' },
   { ref: 'ENT-DM1', name: 'Entrepôt logistique', type: 'Bâtiment industriel', location: 'Diamniadio — zone logistique', area: 1800, floors: 1, budget: 395000000, desc: 'Entrepôt avec bureaux, quai de déchargement et aire de manœuvre.' },
-  { ref: 'IMM-PA4', name: 'Immeuble résidentiel R+4', type: 'Logement collectif', location: 'Dakar — Parcelles Assainies', area: 1250, floors: 5, budget: 510000000, desc: 'Résidence de vingt logements avec cage d’escalier et ascenseur.' },
-  { ref: 'RES-SL1', name: 'Résidence du fleuve', type: 'Logement collectif', location: 'Saint-Louis — Sor', area: 620, floors: 3, budget: 245000000, desc: 'Résidence adaptée au contexte côtier, avec ventilation traversante.' },
-  { ref: 'COM-KL1', name: 'Boutique commerciale', type: 'Commerce', location: 'Kaolack — centre-ville', area: 230, floors: 2, budget: 72000000, desc: 'Espace commercial avec réserve, sanitaires et bureaux à l’étage.' },
-  { ref: 'ATL-ZG1', name: 'Atelier technique municipal', type: 'Bâtiment industriel', location: 'Ziguinchor — Néma', area: 510, floors: 1, budget: 132000000, desc: 'Atelier de maintenance et magasins de pièces détachées.' },
-  { ref: 'MRC-LG1', name: 'Marché couvert de Louga', type: 'Équipement commercial', location: 'Louga — quartier Artillerie', area: 1450, floors: 1, budget: 325000000, desc: 'Halles couvertes, étals, bloc sanitaire et espace de livraison.' },
+];
+
+const interactionTemplates = [
+  { code: '2.2.1', marker: 'DEMO-AVANCEMENT-1', daysAgo: 20, fraction: 0.10, note: 'Béton de propreté coulé et contrôlé sur les premières zones de fondation.' },
+  { code: '2.2.2', marker: 'DEMO-AVANCEMENT-2', daysAgo: 16, fraction: 0.05, note: 'Ferraillage vérifié puis bétonnage partiel des semelles.' },
+  { code: '2.2.8', marker: 'DEMO-AVANCEMENT-3', daysAgo: 12, fraction: 0.03, note: 'Élévation des premiers murs en blocs; aplomb contrôlé.' },
+  { code: '2.3.1', marker: 'DEMO-AVANCEMENT-4', daysAgo: 8, fraction: 0.04, note: 'Enduit intérieur réalisé dans les locaux terminés.' },
+  { code: '2.3.4', marker: 'DEMO-AVANCEMENT-5', daysAgo: 4, fraction: 0.04, note: 'Pose des premiers carreaux après préparation de la chape.' },
 ];
 
 const materials = [
@@ -75,7 +108,6 @@ const taskTemplates = [
   { code: '5.1.1', name: 'Câblage électrique — circuits prises', unit: 'm²', perArea: 1, ratios: { 'Câble électrique 2,5 mm²': 2.8 } },
 ];
 
-try {
   for (const user of users) {
     await db.execute(
       `INSERT INTO users (full_name, username, access_code_hash, role) VALUES (?, ?, ?, ?)
@@ -85,6 +117,10 @@ try {
   }
   const [engineers] = await db.execute<RowDataPacket[]>('SELECT id FROM users WHERE username=?', ['ingenieur']);
   const engineerId = engineers[0].id as number;
+  const [allUsers] = await db.execute<RowDataPacket[]>('SELECT id,username,role FROM users WHERE username IN (?,?,?,?)', users.map((user) => user.username));
+  const userIds = new Map(allUsers.map((user) => [user.username as string, Number(user.id)]));
+  const siteManagerId = userIds.get('chantier');
+  if (!siteManagerId || allUsers.length !== 4) throw new Error('Les quatre comptes de démonstration doivent exister avant de créer les affectations.');
 
   for (const material of materials) {
     await db.execute(
@@ -99,16 +135,23 @@ try {
     if (found.length) {
       projectId = Number(found[0].id);
       await db.execute(
-        `UPDATE projects SET name=?,project_type=?,description=?,location=?,built_area_m2=?,floor_count=?,estimated_budget=?,currency='XOF',is_active=TRUE WHERE id=?`,
+        `UPDATE projects SET name=?,project_type=?,description=?,location=?,built_area_m2=?,floor_count=?,estimated_budget=?,currency='XOF',status='ACTIVE',is_active=TRUE WHERE id=?`,
         [p.name, p.type, p.desc, p.location, p.area, p.floors, p.budget, projectId],
       );
     } else {
       const [inserted] = await db.execute<import('mysql2/promise').ResultSetHeader>(
         `INSERT INTO projects (name,project_type,description,reference_code,location,built_area_m2,floor_count,estimated_budget,currency,status,created_by)
-         VALUES (?,?,?,?,?,?,?,?,'XOF','PLANNING',?)`,
+         VALUES (?,?,?,?,?,?,?,?,'XOF','ACTIVE',?)`,
         [p.name, p.type, p.desc, p.ref, p.location, p.area, p.floors, p.budget, engineerId],
       );
       projectId = inserted.insertId;
+    }
+    for (const member of allUsers) {
+      await db.execute(
+        `INSERT INTO project_members (project_id,user_id,assigned_by) VALUES (?,?,?)
+         ON DUPLICATE KEY UPDATE assigned_by=VALUES(assigned_by)`,
+        [projectId, Number(member.id), engineerId],
+      );
     }
     for (const task of taskTemplates) {
       const quantity = Number((p.area * task.perArea).toFixed(4));
@@ -116,7 +159,7 @@ try {
       let taskId: number;
       if (existing.length) {
         taskId = Number(existing[0].id);
-        await db.execute('UPDATE tasks SET name=?,unit=?,planned_quantity=?,is_active=TRUE WHERE id=?', [task.name, task.unit, quantity, taskId]);
+        await db.execute('UPDATE tasks SET name=?,unit=?,planned_quantity=GREATEST(?,completed_quantity),is_active=TRUE WHERE id=?', [task.name, task.unit, quantity, taskId]);
       } else {
         const [inserted] = await db.execute<import('mysql2/promise').ResultSetHeader>(
           `INSERT INTO tasks (project_id,code,name,unit,planned_quantity,status,created_by) VALUES (?,?,?,?,?,'READY',?)`,
@@ -134,6 +177,12 @@ try {
     }
   }
 
+  await db.execute(
+    `UPDATE projects SET is_active=FALSE
+     WHERE created_by=? AND reference_code IN ('IMM-PA4','RES-SL1','COM-KL1','ATL-ZG1','MRC-LG1')`,
+    [engineerId],
+  );
+
   const [materialRows] = await db.execute<RowDataPacket[]>('SELECT id,name,current_stock FROM materials');
   const byName = new Map(materialRows.map((row) => [row.name as string, row]));
   for (const material of materials) {
@@ -144,7 +193,126 @@ try {
       [row.id, material.stock, material.stock, 'Stock initial de démonstration'],
     );
   }
-  console.log(`Données prêtes : 4 comptes, ${projects.length} chantiers, ${projects.length * taskTemplates.length} tâches planifiées et ${materials.length} matériaux.`);
+
+  const resetInteractions = process.argv.includes('--reset-interactions');
+  if (resetInteractions) {
+    const [demoReports] = await db.execute<RowDataPacket[]>(
+      `SELECT id,task_id FROM daily_reports WHERE note LIKE '[DEMO-AVANCEMENT-%'`,
+    );
+    if (demoReports.length) {
+      const reportIds = demoReports.map((report) => Number(report.id));
+      const taskIds = [...new Set(demoReports.map((report) => Number(report.task_id)))];
+      const reportPlaceholders = reportIds.map(() => '?').join(',');
+      const taskPlaceholders = taskIds.map(() => '?').join(',');
+      const [usedMaterials] = await db.execute<RowDataPacket[]>(
+        `SELECT material_id,SUM(quantity) AS quantity FROM report_materials WHERE report_id IN (${reportPlaceholders}) GROUP BY material_id`,
+        reportIds,
+      );
+      await db.beginTransaction();
+      try {
+        for (const item of usedMaterials) {
+          await db.execute('UPDATE materials SET current_stock=current_stock+? WHERE id=?', [Number(item.quantity), Number(item.material_id)]);
+        }
+        await db.execute(`DELETE FROM report_materials WHERE report_id IN (${reportPlaceholders})`, reportIds);
+        await db.execute(`DELETE FROM stock_movements WHERE report_id IN (${reportPlaceholders})`, reportIds);
+        await db.execute(`DELETE FROM daily_reports WHERE id IN (${reportPlaceholders})`, reportIds);
+        await db.execute(
+          `UPDATE tasks t SET
+             completed_quantity=COALESCE((SELECT SUM(dr.progress_quantity) FROM daily_reports dr WHERE dr.task_id=t.id),0),
+             progress_percent=CASE WHEN t.planned_quantity>0 THEN LEAST(100,COALESCE((SELECT SUM(dr.progress_percent_delta) FROM daily_reports dr WHERE dr.task_id=t.id),0)) ELSE 0 END,
+             status=CASE WHEN COALESCE((SELECT SUM(dr.progress_quantity) FROM daily_reports dr WHERE dr.task_id=t.id),0)<=0 THEN 'READY'
+                         WHEN COALESCE((SELECT SUM(dr.progress_quantity) FROM daily_reports dr WHERE dr.task_id=t.id),0)>=t.planned_quantity THEN 'COMPLETED' ELSE 'ACTIVE' END
+           WHERE t.id IN (${taskPlaceholders})`,
+          taskIds,
+        );
+        await db.commit();
+      } catch (error) {
+        await db.rollback();
+        throw error;
+      }
+    }
+  }
+
+  let insertedInteractions = 0;
+  for (const p of projects) {
+    const [projectRows] = await db.execute<RowDataPacket[]>('SELECT id FROM projects WHERE reference_code=? AND is_active=TRUE ORDER BY id LIMIT 1', [p.ref]);
+    const projectId = Number(projectRows[0].id);
+    for (const interaction of interactionTemplates) {
+      const [taskRows] = await db.execute<RowDataPacket[]>(
+        'SELECT id,planned_quantity,completed_quantity,progress_percent FROM tasks WHERE project_id=? AND code=? AND is_active=TRUE ORDER BY id LIMIT 1',
+        [projectId, interaction.code],
+      );
+      if (!taskRows[0]) continue;
+      const taskId = Number(taskRows[0].id);
+      const marker = `[${interaction.marker}]`;
+      const [existing] = await db.execute<RowDataPacket[]>(
+        'SELECT id FROM daily_reports WHERE task_id=? AND note LIKE ? LIMIT 1', [taskId, `${marker}%`],
+      );
+      if (existing.length) continue;
+
+      const planned = Number(taskRows[0].planned_quantity);
+      const completedBefore = Number(taskRows[0].completed_quantity);
+      const progressBefore = Number(taskRows[0].progress_percent);
+      const quantity = Number(Math.min(planned * interaction.fraction, Math.max(0, planned - completedBefore)).toFixed(4));
+      if (quantity <= 0) continue;
+      const percentDelta = Number(Math.min(Math.max(0, 100 - progressBefore), quantity / planned * 100).toFixed(3));
+      if (percentDelta <= 0) continue;
+      const [ratioRows] = await db.execute<RowDataPacket[]>(
+        `SELECT tm.material_id,tm.quantity_per_unit,m.name,m.unit,m.current_stock
+         FROM task_materials tm JOIN materials m ON m.id=tm.material_id
+         WHERE tm.task_id=? AND m.is_active=TRUE ORDER BY m.id`, [taskId],
+      );
+      if (!ratioRows.length) continue;
+      const consumptions = ratioRows.map((ratio) => ({
+        ...ratio,
+        quantity: Number((Number(ratio.quantity_per_unit) * quantity * 1.02).toFixed(4)),
+      }));
+      const insufficient = consumptions.find((item) => Number(item.current_stock) < item.quantity);
+      if (insufficient) {
+        console.warn(`Interaction ignorée pour ${p.ref} (${interaction.code}) : stock de ${insufficient.name} insuffisant.`);
+        continue;
+      }
+
+      const reportDate = new Date();
+      reportDate.setUTCDate(reportDate.getUTCDate() - interaction.daysAgo);
+      const dateText = reportDate.toISOString().slice(0, 10);
+      await db.beginTransaction();
+      try {
+        const [report] = await db.execute<import('mysql2/promise').ResultSetHeader>(
+          `INSERT INTO daily_reports (task_id,report_date,progress_quantity,progress_percent_delta,note,created_by)
+           VALUES (?,?,?,?,?,?)`,
+          [taskId, dateText, quantity, percentDelta, `${marker} ${interaction.note}`, siteManagerId],
+        );
+        for (const item of consumptions) {
+          const balance = Number(item.current_stock) - item.quantity;
+          await db.execute('INSERT INTO report_materials (report_id,material_id,quantity) VALUES (?,?,?)', [report.insertId, item.material_id, item.quantity]);
+          await db.execute('UPDATE materials SET current_stock=? WHERE id=?', [balance, item.material_id]);
+          await db.execute(
+            `INSERT INTO stock_movements (material_id,movement_type,quantity,balance_after,report_id,note,created_by)
+             VALUES (?,'OUT',?,?,?,?,?)`,
+            [item.material_id, item.quantity, balance, report.insertId, `Consommation de démonstration · ${p.ref}`, siteManagerId],
+          );
+        }
+        const completed = completedBefore + quantity;
+        const progress = Math.min(100, progressBefore + percentDelta);
+        await db.execute(
+          `UPDATE tasks SET completed_quantity=?,progress_percent=?,status=? WHERE id=?`,
+          [completed, progress, completed >= planned - 0.00001 ? 'COMPLETED' : 'ACTIVE', taskId],
+        );
+        await db.commit();
+        insertedInteractions += 1;
+      } catch (error) {
+        await db.rollback();
+        throw error;
+      }
+    }
+  }
+  const [interactionTotals] = await db.execute<RowDataPacket[]>(
+    `SELECT COUNT(*) AS total FROM daily_reports dr
+     JOIN tasks t ON t.id=dr.task_id JOIN projects p ON p.id=t.project_id
+     WHERE p.is_active=TRUE AND dr.note LIKE '[DEMO-AVANCEMENT-%'`,
+  );
+  console.log(`Données prêtes : 4 utilisateurs, ${projects.length} projets affectés aux quatre utilisateurs, ${projects.length * taskTemplates.length} tâches et ${interactionTotals[0].total} interactions terrain disponibles (${insertedInteractions} nouvelles ajoutées).`);
 } finally {
   await db.end();
 }

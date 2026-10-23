@@ -6,12 +6,16 @@ import { InputError, jsonError, requireText } from '@/lib/http';
 
 export async function GET() {
   try {
-    await requireUser(['ENGINEER', 'RESOURCE_MANAGER', 'SITE_MANAGER']);
+    const user = await requireUser(['ENGINEER', 'RESOURCE_MANAGER', 'SITE_MANAGER']);
     const [projects] = await db.execute<RowDataPacket[]>(
       `SELECT p.id,p.name,p.project_type,p.description,p.reference_code,p.location,p.built_area_m2,p.floor_count,p.estimated_budget,p.currency,p.status,p.start_date,p.target_end_date,
         (SELECT COUNT(*) FROM tasks t WHERE t.project_id=p.id AND t.is_active=TRUE) AS task_count,
-        (SELECT COALESCE(AVG(t.progress_percent),0) FROM tasks t WHERE t.project_id=p.id AND t.is_active=TRUE) AS progress_percent
-       FROM projects p WHERE p.is_active=TRUE ORDER BY p.id`,
+        (SELECT COALESCE(AVG(t.progress_percent),0) FROM tasks t WHERE t.project_id=p.id AND t.is_active=TRUE) AS progress_percent,
+        (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id=p.id) AS member_count
+       FROM projects p WHERE p.is_active=TRUE
+        AND (?='ENGINEER' OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?))
+       ORDER BY p.id`,
+      [user.role, user.id],
     );
     return NextResponse.json({ projects });
   } catch (error) { return jsonError(error); }
@@ -37,6 +41,11 @@ export async function POST(request: NextRequest) {
     const [result] = await db.execute<ResultSetHeader>(
       'INSERT INTO projects (name,project_type,description,reference_code,location,built_area_m2,floor_count,estimated_budget,currency,start_date,target_end_date,status,created_by) VALUES (?,?,?,?,?,?,?,?,\'XOF\',?,?,\'PLANNING\',?)',
       [name, projectType, description, code, location || null, builtArea, floorCount, budget, startDate, targetEndDate, user.id],
+    );
+    await db.execute(
+      `INSERT INTO project_members (project_id,user_id,assigned_by)
+       SELECT ?,id,? FROM users WHERE is_active=TRUE AND role IN ('ENGINEER','RESOURCE_MANAGER','SITE_MANAGER','ANALYST')`,
+      [result.insertId, user.id],
     );
     return NextResponse.json({ id: result.insertId }, { status: 201 });
   } catch (error) { return jsonError(error); }

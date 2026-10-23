@@ -7,7 +7,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "seed": "tsx database/seed.ts"
+    "seed": "tsx database/seed.ts",
+    "seed:reset-interactions": "tsx database/seed.ts --reset-interactions",
+    "seed:villa-progress": "tsx database/seed-villa-progress.ts",
+    "seed:project-progress": "tsx database/seed-villa-progress.ts"
   },
   "engines": { "node": ">=20.9.0" },
   "dependencies": {

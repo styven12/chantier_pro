@@ -24,12 +24,14 @@ async function ensureActiveMaterials(connection: PoolConnection, ratios: { mater
 
 export async function GET() {
   try {
-    await requireUser([...ROLES]);
+    const user = await requireUser([...ROLES]);
     const [tasks] = await db.execute<RowDataPacket[]>(
       `SELECT t.id,t.project_id,t.code,t.name,t.unit,t.planned_quantity,t.completed_quantity,
         t.progress_percent,t.target_daily_quantity,COALESCE(t.start_date,p.start_date) AS start_date,t.due_date,t.status,p.name AS project_name
        FROM tasks t JOIN projects p ON p.id=t.project_id
-       WHERE t.is_active=TRUE AND p.is_active=TRUE ORDER BY p.id,t.id`,
+       WHERE t.is_active=TRUE AND p.is_active=TRUE
+        AND (?='ENGINEER' OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?))
+       ORDER BY p.id,t.id`, [user.role, user.id],
     );
     const [ratios] = await db.execute<RowDataPacket[]>(
       `SELECT tm.task_id,tm.material_id,tm.quantity_per_unit,m.name AS material_name,m.unit AS material_unit

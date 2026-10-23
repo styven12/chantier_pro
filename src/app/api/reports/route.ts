@@ -7,14 +7,16 @@ import { predictTask, type ProgressSample } from '@/lib/prediction';
 
 export async function GET(request: NextRequest) {
   try {
-    await requireUser(['ENGINEER', 'RESOURCE_MANAGER', 'SITE_MANAGER']);
+    const user = await requireUser(['ENGINEER', 'RESOURCE_MANAGER', 'SITE_MANAGER']);
     const taskId = request.nextUrl.searchParams.get('taskId');
     const [reports] = await db.execute<RowDataPacket[]>(
       `SELECT r.id,r.task_id,r.report_date,r.progress_quantity,r.progress_percent_delta,r.note,r.created_at,
-        t.name AS task_name,t.unit AS task_unit,u.full_name AS created_by_name
-       FROM daily_reports r JOIN tasks t ON t.id=r.task_id LEFT JOIN users u ON u.id=r.created_by
-       WHERE (? IS NULL OR r.task_id=?) ORDER BY r.report_date DESC,r.id DESC LIMIT 100`,
-      [taskId, taskId],
+        t.name AS task_name,t.unit AS task_unit,p.name AS project_name,u.full_name AS created_by_name
+       FROM daily_reports r JOIN tasks t ON t.id=r.task_id JOIN projects p ON p.id=t.project_id LEFT JOIN users u ON u.id=r.created_by
+       WHERE p.is_active=TRUE AND (? IS NULL OR r.task_id=?)
+        AND (?='ENGINEER' OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=t.project_id AND pm.user_id=?))
+       ORDER BY r.report_date DESC,r.id DESC LIMIT 100`,
+      [taskId, taskId, user.role, user.id],
     );
     const ids = reports.map((r) => Number(r.id));
     let materials: RowDataPacket[] = [];
@@ -25,7 +27,11 @@ export async function GET(request: NextRequest) {
       );
       materials = rows;
     }
-    return NextResponse.json({ reports: reports.map((r) => ({ ...r, materials: materials.filter((m) => Number(m.report_id) === Number(r.id)) })) });
+    return NextResponse.json({ reports: reports.map((r) => ({
+      ...r,
+      note: typeof r.note === 'string' ? r.note.replace(/^\[DEMO-AVANCEMENT-\d+\]\s*/, '') : r.note,
+      materials: materials.filter((m) => Number(m.report_id) === Number(r.id)),
+    })) });
   } catch (error) { return jsonError(error); }
 }
 
@@ -42,7 +48,7 @@ export async function POST(request: NextRequest) {
     if (percentDelta !== null && percentDelta > 100) throw new InputError('L’avancement du jour ne peut pas dépasser 100 %.');
     const reportDate = body.reportDate || new Date().toISOString().slice(0, 10);
     if (typeof reportDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) throw new InputError('Date du relevé invalide.');
-    if (!Array.isArray(body.materials) || body.materials.length === 0) throw new InputError('Ajoutez au moins une consommation de matériau.');
+    if (!Array.isArray(body.materials)) throw new InputError('La liste des matériaux consommés est invalide.');
     const usages = body.materials.map((item: any) => ({
       materialId: Number(item?.materialId), quantity: requirePositive(item?.quantity, 'Quantité consommée'),
     }));
@@ -54,7 +60,8 @@ export async function POST(request: NextRequest) {
     await connection.beginTransaction();
     const [taskRows] = await connection.execute<RowDataPacket[]>(
       `SELECT t.id,t.project_id,t.planned_quantity,t.completed_quantity,t.progress_percent,t.target_daily_quantity,COALESCE(t.start_date,p.start_date) AS start_date,t.due_date,t.status
-       FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=? AND t.is_active=TRUE AND t.status IN ('READY','ACTIVE') AND p.is_active=TRUE FOR UPDATE`, [taskId],
+       FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=? AND t.is_active=TRUE AND t.status IN ('READY','ACTIVE') AND p.is_active=TRUE
+        AND EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?) FOR UPDATE`, [taskId, user.id],
     );
     const task = taskRows[0];
     if (!task) throw new InputError('Cette tâche n’est pas disponible dans le carnet de chantier.');
@@ -66,7 +73,8 @@ export async function POST(request: NextRequest) {
     const allowed = new Set<number>();
     const [ratios] = await connection.execute<RowDataPacket[]>('SELECT material_id FROM task_materials WHERE task_id=?', [taskId]);
     ratios.forEach((ratio) => allowed.add(Number(ratio.material_id)));
-    if (usages.some((usage: { materialId: number }) => !allowed.has(usage.materialId))) throw new InputError('Un matériau saisi ne fait pas partie du besoin défini pour cette tâche.');
+    if (ratios.length > 0 && usages.length === 0) throw new InputError('Ajoutez au moins une consommation de matériau pour cette tâche.');
+    if (ratios.length > 0 && usages.some((usage: { materialId: number }) => !allowed.has(usage.materialId))) throw new InputError('Un matériau saisi ne fait pas partie du besoin défini pour cette tâche.');
     for (const usage of usages) {
       const [stockRows] = await connection.execute<RowDataPacket[]>('SELECT current_stock,name,unit FROM materials WHERE id=? AND is_active=TRUE FOR UPDATE', [usage.materialId]);
       if (!stockRows[0]) throw new InputError('Un matériau a été désactivé. Actualisez puis recommencez.');

@@ -25,11 +25,13 @@ type AnalyticsTaskRow = RowDataPacket & {
 
 export async function GET() {
   try {
-    await requireUser(['ANALYST']);
+    const user = await requireUser(['ANALYST']);
     const [tasks] = await db.execute<AnalyticsTaskRow[]>(
       `SELECT t.id,t.project_id,t.code,t.name,t.unit,t.planned_quantity,t.completed_quantity,t.progress_percent,
         t.target_daily_quantity,COALESCE(t.start_date,p.start_date) AS start_date,t.due_date,t.status,p.name AS project_name,p.location,p.target_end_date
-       FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.is_active=TRUE AND p.is_active=TRUE ORDER BY p.id,t.id`,
+       FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.is_active=TRUE AND p.is_active=TRUE
+        AND EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?)
+       ORDER BY p.id,t.id`, [user.id],
     );
     const [materials] = await db.execute<RowDataPacket[]>(
       `SELECT m.id,m.name,m.unit,m.current_stock,m.minimum_stock,
@@ -110,7 +112,8 @@ export async function GET() {
         (SELECT COALESCE(SUM(dr.progress_percent_delta),0) FROM daily_reports dr
          WHERE dr.task_id=s.task_id AND dr.created_at>s.created_at AND dr.created_at<=DATE_ADD(s.created_at,INTERVAL 7 DAY)) AS actual_delta_7d
        FROM prediction_snapshots s JOIN tasks t ON t.id=s.task_id JOIN projects p ON p.id=s.project_id
-       ORDER BY s.created_at DESC LIMIT 30`,
+       WHERE p.is_active=TRUE AND EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?)
+       ORDER BY s.created_at DESC`, [user.id],
     );
     const comparisons = snapshots.map((snapshot) => {
       const ageDays = Math.floor((Date.now() - new Date(snapshot.created_at).getTime()) / 86_400_000);
@@ -125,10 +128,14 @@ export async function GET() {
         t.name AS task_name,t.code AS task_code,m.id AS material_id,m.name AS material_name,m.unit,rm.quantity
        FROM daily_reports dr JOIN tasks t ON t.id=dr.task_id JOIN projects p ON p.id=t.project_id
        JOIN report_materials rm ON rm.report_id=dr.id JOIN materials m ON m.id=rm.material_id
-       WHERE p.is_active=TRUE ORDER BY p.id,dr.report_date DESC,dr.id DESC,m.name`,
+       WHERE p.is_active=TRUE AND EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?)
+       ORDER BY p.id,dr.report_date DESC,dr.id DESC,m.name`, [user.id],
     );
     const [reportSummary] = await db.execute<RowDataPacket[]>(
-      `SELECT COUNT(*) AS count,MAX(report_date) AS last_report FROM daily_reports`,
+      `SELECT COUNT(*) AS count,MAX(dr.report_date) AS last_report FROM daily_reports dr
+       JOIN tasks t ON t.id=dr.task_id JOIN projects p ON p.id=t.project_id
+       JOIN project_members pm ON pm.project_id=t.project_id
+       WHERE p.is_active=TRUE AND pm.user_id=?`, [user.id],
     );
     return NextResponse.json({ projects, tasks: forecastTasks, materials, comparisons, projectHistory, reportSummary: reportSummary[0] });
   } catch (error) { return jsonError(error); }
