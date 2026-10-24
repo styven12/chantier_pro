@@ -263,8 +263,19 @@ const taskTemplates = [
          WHERE tm.task_id=? AND m.is_active=TRUE ORDER BY m.id`, [taskId],
       );
       if (!ratioRows.length) continue;
-      const consumptions = ratioRows.map((ratio) => ({
-        ...ratio,
+      const consumptions: {
+        material_id: number;
+        quantity_per_unit: number;
+        name: string;
+        unit: string;
+        current_stock: number;
+        quantity: number;
+      }[] = ratioRows.map((ratio) => ({
+        material_id: Number(ratio.material_id),
+        quantity_per_unit: Number(ratio.quantity_per_unit),
+        name: String(ratio.name),
+        unit: String(ratio.unit),
+        current_stock: Number(ratio.current_stock),
         quantity: Number((Number(ratio.quantity_per_unit) * quantity * 1.02).toFixed(4)),
       }));
       const insufficient = consumptions.find((item) => Number(item.current_stock) < item.quantity);

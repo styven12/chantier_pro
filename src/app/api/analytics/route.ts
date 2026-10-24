@@ -50,6 +50,13 @@ export async function GET() {
       `SELECT dr.task_id,rm.material_id,SUM(rm.quantity) AS consumed
        FROM report_materials rm JOIN daily_reports dr ON dr.id=rm.report_id GROUP BY dr.task_id,rm.material_id`,
     );
+    const [projectDailyRows] = await db.execute<RowDataPacket[]>(
+      `SELECT t.project_id,dr.report_date,SUM(dr.progress_percent_delta) AS progress_delta
+       FROM daily_reports dr JOIN tasks t ON t.id=dr.task_id JOIN projects p ON p.id=t.project_id
+       WHERE p.is_active=TRUE AND t.is_active=TRUE
+        AND EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?)
+       GROUP BY t.project_id,dr.report_date ORDER BY t.project_id,dr.report_date`, [user.id],
+    );
     const byTask = new Map<number, RowDataPacket[]>();
     ratioRows.forEach((row) => byTask.set(Number(row.task_id), [...(byTask.get(Number(row.task_id)) ?? []), row]));
     const samplesByTask = new Map<number, ProgressSample[]>();
@@ -105,23 +112,53 @@ export async function GET() {
       progressPercent: p.tasks ? p.progressTotal / p.tasks : 0,
       successProbability: p.probabilityCount ? p.probabilityTotal / p.probabilityCount : null,
     }));
-    const [snapshots] = await db.execute<RowDataPacket[]>(
-      `SELECT s.id,s.task_id,s.project_id,s.baseline_percent,s.predicted_percent_7d,
-        s.logistic_success_probability,s.normal_success_probability,s.uniform_success_probability,
-        s.sample_days,s.created_at,t.name AS task_name,p.name AS project_name,
-        (SELECT COALESCE(SUM(dr.progress_percent_delta),0) FROM daily_reports dr
-         WHERE dr.task_id=s.task_id AND dr.created_at>s.created_at AND dr.created_at<=DATE_ADD(s.created_at,INTERVAL 7 DAY)) AS actual_delta_7d
-       FROM prediction_snapshots s JOIN tasks t ON t.id=s.task_id JOIN projects p ON p.id=s.project_id
-       WHERE p.is_active=TRUE AND EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?)
-       ORDER BY s.created_at DESC`, [user.id],
-    );
-    const comparisons = snapshots.map((snapshot) => {
-      const ageDays = Math.floor((Date.now() - new Date(snapshot.created_at).getTime()) / 86_400_000);
-      const actual = Math.min(100, Number(snapshot.baseline_percent) + Number(snapshot.actual_delta_7d ?? 0));
-      const predicted = Number(snapshot.predicted_percent_7d);
-      return { ...snapshot, ageDays, actualProgressPercent: ageDays >= 7 ? actual : null,
-        actualDeltaPoints: ageDays >= 7 ? actual - Number(snapshot.baseline_percent) : null,
-        predictionErrorPoints: ageDays >= 7 ? actual - predicted : null };
+    const linearProjects = projects.map((project) => {
+      const projectTasks = forecastTasks.filter((task) => Number(task.project_id) === project.id);
+      const dailyProgress = projectDailyRows.filter((row) => Number(row.project_id) === project.id);
+      const firstDay = dailyProgress.length ? new Date(dailyProgress[0].report_date).getTime() : 0;
+      let cumulative = 0;
+      const points = dailyProgress.map((row) => {
+        cumulative += Number(row.progress_delta) / Math.max(1, project.tasks);
+        return { x: (new Date(row.report_date).getTime() - firstDay) / 86_400_000, y: cumulative };
+      });
+      const meanX = points.length ? points.reduce((sum, point) => sum + point.x, 0) / points.length : 0;
+      const meanY = points.length ? points.reduce((sum, point) => sum + point.y, 0) / points.length : 0;
+      const varianceX = points.reduce((sum, point) => sum + (point.x - meanX) ** 2, 0);
+      const slope = points.length >= 2 && varianceX > 0
+        ? points.reduce((sum, point) => sum + (point.x - meanX) * (point.y - meanY), 0) / varianceX
+        : 0;
+      const estimatedDaysRemaining = slope > 0
+        ? Math.ceil(Math.max(0, 100 - project.progressPercent) / slope)
+        : null;
+
+      const materialTotals = new Map<number, { materialId: number; name: string; unit: string; quantity: number; observedTasks: number; ratioTasks: number }>();
+      for (const task of projectTasks) {
+        const remaining = Math.max(0, Number(task.planned_quantity) - Number(task.completed_quantity));
+        for (const ratio of task.ratios) {
+          const materialId = Number(ratio.material_id);
+          const actualUsed = usageByTask.get(`${task.id}:${materialId}`) ?? 0;
+          const completed = Number(task.completed_quantity);
+          const hasObservedRate = actualUsed > 0 && completed > 0;
+          const rate = hasObservedRate ? actualUsed / completed : Number(ratio.quantity_per_unit);
+          const item = materialTotals.get(materialId) ?? {
+            materialId, name: ratio.material_name, unit: ratio.material_unit,
+            quantity: 0, observedTasks: 0, ratioTasks: 0,
+          };
+          item.quantity += remaining * rate;
+          if (hasObservedRate) item.observedTasks += 1;
+          else item.ratioTasks += 1;
+          materialTotals.set(materialId, item);
+        }
+      }
+      return {
+        ...project,
+        linearForecast: {
+          estimatedDaysRemaining,
+          dailyProgressPercent: slope,
+          observationDays: points.length,
+          materials: [...materialTotals.values()].sort((a, b) => b.quantity - a.quantity),
+        },
+      };
     });
     const [projectHistory] = await db.execute<RowDataPacket[]>(
       `SELECT p.id AS project_id,p.name AS project_name,dr.id AS report_id,dr.report_date,
@@ -137,6 +174,6 @@ export async function GET() {
        JOIN project_members pm ON pm.project_id=t.project_id
        WHERE p.is_active=TRUE AND pm.user_id=?`, [user.id],
     );
-    return NextResponse.json({ projects, tasks: forecastTasks, materials, comparisons, projectHistory, reportSummary: reportSummary[0] });
+    return NextResponse.json({ projects: linearProjects, tasks: forecastTasks, materials, projectHistory, reportSummary: reportSummary[0] });
   } catch (error) { return jsonError(error); }
 }
